@@ -18,7 +18,10 @@ PDF → pypdf 抽取文字                      提问 → BGE 向量化
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt -i https://pypi.org/simple
+# 建独立虚拟环境（不要装到全局 Python）
+python -m venv .venv
+.venv\Scripts\activate          # Windows；macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 1) 配置密钥（不要写进代码）
 cp .env.example .env      # 填入 DEEPSEEK_API_KEY
