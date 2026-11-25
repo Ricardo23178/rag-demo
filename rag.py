@@ -11,6 +11,7 @@ from config import (  # noqa: E402
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
     EMBED_MODEL,
+    MIN_SCORE,
     TOP_K,
 )
 
@@ -39,7 +40,8 @@ class Hit:
 
 
 class RagEngine:
-    def __init__(self) -> None:
+    def __init__(self, collection_name: str | None = None) -> None:
+        self._name = collection_name or COLLECTION
         self._model: TextEmbedding | None = None
         self._collection = None
 
@@ -53,7 +55,7 @@ class RagEngine:
     def collection(self):
         if self._collection is None:
             client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-            self._collection = client.get_collection(COLLECTION)
+            self._collection = client.get_collection(self._name)
         return self._collection
 
     def retrieve(self, question: str, k: int = TOP_K) -> list[Hit]:
@@ -91,9 +93,20 @@ class RagEngine:
         )
         return messages
 
+    def is_low_confidence(self, hits: list[Hit], min_score: float = MIN_SCORE) -> bool:
+        """top1 相似度低于阈值时视为「资料里没有」，避免拿无关片段硬答。"""
+        return not hits or hits[0].score < min_score
+
     def stream_answer(
         self, question: str, hits: list[Hit], history: list[dict] | None = None
     ):
+        if self.is_low_confidence(hits):
+            top = hits[0].score if hits else 0.0
+            yield (
+                f"资料中未找到相关内容（最高相似度 {top:.2f}，低于阈值 {MIN_SCORE:.2f}）。"
+                "请换个问法，或确认该内容是否在这份资料范围内。"
+            )
+            return
         if not DEEPSEEK_API_KEY:
             raise RuntimeError("未设置环境变量 DEEPSEEK_API_KEY")
         client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)

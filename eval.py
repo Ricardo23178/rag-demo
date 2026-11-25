@@ -32,9 +32,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--llm", action="store_true", help="同时评测生成回答")
     parser.add_argument("--k", type=int, default=TOP_K)
+    parser.add_argument(
+        "--collection", default=None, help="指定集合名，默认使用 config.COLLECTION"
+    )
     args = parser.parse_args()
 
-    engine = RagEngine()
+    engine = RagEngine(args.collection)
     rows = []
     hits_at_k = 0
     reciprocal_ranks = []

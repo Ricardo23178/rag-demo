@@ -53,8 +53,10 @@ def clean_lines(text: str, boilerplate: set[str]) -> list[str]:
     return kept
 
 
-def build_chunks(pages: list[str], boilerplate: set[str], source: str) -> list[dict]:
-    """按小节聚块，并把课件里的排版折行接回整句。"""
+def build_chunks(
+    pages: list[str], boilerplate: set[str], source: str, merge: bool = True
+) -> list[dict]:
+    """按小节聚块；merge=True 时把课件里的排版折行接回整句。"""
     chunks: list[dict] = []
     section = "开篇"
     paras: list[str] = []
@@ -86,7 +88,12 @@ def build_chunks(pages: list[str], boilerplate: set[str], source: str) -> list[d
                 section = f"{match.group(1)} {match.group(2)}".strip()
                 continue
             # 上一行没有句末标点、本行也不是列表项 → 说明是排版折行，接回去
-            if paras and not paras[-1].endswith(SENTENCE_END) and not LIST_START_RE.match(line):
+            if (
+                merge
+                and paras
+                and not paras[-1].endswith(SENTENCE_END)
+                and not LIST_START_RE.match(line)
+            ):
                 prev = paras[-1]
                 # 短行多半是小标题或列表项，补一个分隔符，避免两句粘成一句
                 separator = "：" if len(prev) <= 8 else ("；" if len(prev) <= 18 else "")
@@ -118,7 +125,13 @@ def dedupe(chunks: list[dict]) -> list[dict]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true", help="不清空已有集合")
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="对照组：不剔除页眉页脚、不合并折行，写入 <集合>_raw 用于对比实验",
+    )
     args = parser.parse_args()
+    collection_name = COLLECTION + "_raw" if args.raw else COLLECTION
 
     pdfs = sorted(DATA_DIR.glob("*.pdf"))
     if not pdfs:
@@ -127,8 +140,8 @@ def main() -> None:
     all_chunks: list[dict] = []
     for pdf in pdfs:
         pages = extract_pages(pdf)
-        boiler = detect_boilerplate(pages)
-        chunks = dedupe(build_chunks(pages, boiler, pdf.name))
+        boiler = set() if args.raw else detect_boilerplate(pages)
+        chunks = dedupe(build_chunks(pages, boiler, pdf.name, merge=not args.raw))
         total_chars = sum(len(p) for p in pages)
         kept_chars = sum(len(c["text"]) for c in chunks)
         print(
@@ -151,11 +164,11 @@ def main() -> None:
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     if not args.keep:
         try:
-            client.delete_collection(COLLECTION)
+            client.delete_collection(collection_name)
         except Exception:
             pass
     collection = client.get_or_create_collection(
-        COLLECTION, metadata={"hnsw:space": "cosine"}
+        collection_name, metadata={"hnsw:space": "cosine"}
     )
     collection.add(
         ids=[f"c{i:04d}" for i in range(len(all_chunks))],
@@ -171,7 +184,7 @@ def main() -> None:
             for c in all_chunks
         ],
     )
-    print(f"写入完成，集合 {COLLECTION} 当前条数={collection.count()}")
+    print(f"写入完成，集合 {collection_name} 当前条数={collection.count()}")
 
 
 if __name__ == "__main__":
