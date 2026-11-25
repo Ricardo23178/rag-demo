@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 语料：版权原因不入库，自行放入 data/ 后跑 ingest.py
+data/*.pdf
+
+# 向量库与生成的中间产物
+chroma_db/
+chunks_dump.txt
+
+# 密钥：只提交 .env.example
+.env
+.env.local
