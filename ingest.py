@@ -1,8 +1,11 @@
-"""离线建库：PDF -> 清洗 -> 按小节切块 -> 向量化 -> 写入 Chroma。
+"""离线建库：文档 -> 清洗 -> 按小节切块 -> 向量化 -> 写入 Chroma。
+
+支持 PDF / DOCX / Markdown / 纯文本（自动识别 data/ 下的文件）。
 
 用法：
-    python ingest.py                # 增量重建（先清空同名集合）
+    python ingest.py                # 重建（先清空同名集合）
     python ingest.py --keep         # 不清空，直接追加
+    python ingest.py --raw          # 对照组：不清洗，用于消融实验
 """
 import argparse
 import re
@@ -18,17 +21,65 @@ from pypdf import PdfReader
 
 # 形如 "7.1  数据库设计概述" / "7.1.1  数据库设计的特点"
 HEADING_RE = re.compile(r"^(\d+(?:\.\d+){0,2})\s+(\S.{1,40})$")
+# Markdown / DOCX 标题（docx 的 Heading 样式会被转成 "## 标题"）
+MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 # 句子结束符：遇到这些才允许换行，否则视为排版折行，接回上一行
 SENTENCE_END = tuple("。！？；：.!?;:")
 # 列表项开头：这些行要单独成行，不能被上一行吞掉
 LIST_START_RE = re.compile(r"^([（(]?\d+[)）.、]|[①-⑩]|[-•·●▪]|（续）)")
 MAX_CHUNK_CHARS = 1200
 MIN_CHUNK_CHARS = 120
+# 非 PDF 文件没有真实页码，按每 40 行切一个「虚拟页」，让引用仍有位置信息
+BLOCK_LINES = 40
+SUPPORTED_SUFFIXES = {".pdf", ".docx", ".md", ".txt"}
 
 
 def extract_pages(pdf_path: Path) -> list[str]:
     reader = PdfReader(str(pdf_path))
     return [page.extract_text() or "" for page in reader.pages]
+
+
+def _paginate(lines: list[str], size: int = BLOCK_LINES) -> list[str]:
+    return ["\n".join(lines[i : i + size]) for i in range(0, len(lines), size)]
+
+
+def _load_docx(path: Path) -> list[str]:
+    from docx import Document
+
+    document = Document(str(path))
+    lines: list[str] = []
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        style = (paragraph.style.name or "").lower()
+        if style.startswith("heading") or style.startswith("标题"):
+            lines.append(f"## {text}")
+        else:
+            lines.append(text)
+    for table in document.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if cells:
+                lines.append(" | ".join(cells))
+    return _paginate(lines)
+
+
+def _load_text(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return _paginate([line.strip() for line in text.splitlines() if line.strip()])
+
+
+def load_document(path: Path) -> list[str]:
+    """按扩展名选择加载器，统一返回「页/块」文本列表。"""
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return extract_pages(path)
+    if suffix == ".docx":
+        return _load_docx(path)
+    if suffix in {".md", ".txt"}:
+        return _load_text(path)
+    raise ValueError(f"不支持的文件类型：{suffix}")
 
 
 def detect_boilerplate(pages: list[str], ratio: float = 0.5) -> set[str]:
@@ -58,6 +109,9 @@ def build_chunks(
 ) -> list[dict]:
     """按小节聚块；merge=True 时把课件里的排版折行接回整句。"""
     chunks: list[dict] = []
+    # 短文档（FAQ、说明页）如果按 120 字门槛过滤会把内容全丢掉，按体量自适应
+    total_chars = sum(len(page) for page in pages)
+    min_chars = MIN_CHUNK_CHARS if total_chars >= 3000 else 40
     section = "开篇"
     paras: list[str] = []
     pages_used: list[int] = []
@@ -66,7 +120,7 @@ def build_chunks(
     def flush() -> None:
         nonlocal paras, pages_used, buf_len
         body = "\n".join(paras).strip()
-        if len(body) >= MIN_CHUNK_CHARS:
+        if len(body) >= min_chars:
             page_start, page_end = pages_used[0], pages_used[-1]
             pages_label = f"{page_start}" if page_start == page_end else f"{page_start}-{page_end}"
             chunks.append(
@@ -82,6 +136,11 @@ def build_chunks(
 
     for page_no, text in enumerate(pages, start=1):
         for line in clean_lines(text, boilerplate):
+            markdown_heading = MD_HEADING_RE.match(line)
+            if markdown_heading:
+                flush()
+                section = markdown_heading.group(2).strip()
+                continue
             match = HEADING_RE.match(line)
             if match:
                 flush()
@@ -133,19 +192,23 @@ def main() -> None:
     args = parser.parse_args()
     collection_name = COLLECTION + "_raw" if args.raw else COLLECTION
 
-    pdfs = sorted(DATA_DIR.glob("*.pdf"))
-    if not pdfs:
-        raise SystemExit(f"{DATA_DIR} 下没有找到 PDF")
+    documents = sorted(
+        path for path in DATA_DIR.iterdir() if path.suffix.lower() in SUPPORTED_SUFFIXES
+    )
+    if not documents:
+        raise SystemExit(
+            f"{DATA_DIR} 下没有找到可用文件（支持 {'/'.join(sorted(SUPPORTED_SUFFIXES))}）"
+        )
 
     all_chunks: list[dict] = []
-    for pdf in pdfs:
-        pages = extract_pages(pdf)
+    for document in documents:
+        pages = load_document(document)
         boiler = set() if args.raw else detect_boilerplate(pages)
-        chunks = dedupe(build_chunks(pages, boiler, pdf.name, merge=not args.raw))
+        chunks = dedupe(build_chunks(pages, boiler, document.name, merge=not args.raw))
         total_chars = sum(len(p) for p in pages)
         kept_chars = sum(len(c["text"]) for c in chunks)
         print(
-            f"[{pdf.name}] 页数={len(pages)} 原始字符={total_chars} "
+            f"[{document.name}] 页数={len(pages)} 原始字符={total_chars} "
             f"剔除模板行={len(boiler)} 切块={len(chunks)} 保留字符={kept_chars}"
         )
         if boiler:
