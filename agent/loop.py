@@ -18,21 +18,23 @@ from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 
 MAX_STEPS = 5
 MAX_HISTORY = 6
-WRITE_TOOLS = {"save_note"}
+WRITE_TOOLS = {"confirm_reminder"}
 REQUEST_TIMEOUT = 20
 
-SYSTEM_PROMPT = """你是一个课件学习助手，整门课的资料只有一份 PDF 课件。你可以调用三个工具：
+SYSTEM_PROMPT = """你是用户的个人助理，能查两类东西：
 
-- search_courseware：查课件里的具体知识（概念、原理、SQL 写法、术语解释）
-- list_sections：查课件目录与章节页码范围
-- save_note：把整理好的内容存成本地笔记（写操作）
+【学习】search_courseware —— 在《数据库系统概论》课件里查知识点，回答必须带出处。
+【用药】get_today_reminders / get_recent_records —— 查用户自己的服药提醒与记录。
+        confirm_reminder —— 把某条提醒标记为已服/稍后/跳过（写操作）。
 
 工作规则：
-1. 先判断用户想干什么，再选工具。问知识点才检索，问目录直接列章节，不要一律检索。
-2. 只依据工具返回的内容回答；工具返回 found=false 时，直说课件里没有，不要用常识补。
-3. 要存笔记时，先把标题和内容给用户看并确认，用户同意后再调用 save_note。
-4. 回答用简体中文，分点、简洁；引用课件内容时保留出处（小节 + 页码）。
-5. 如果用户的请求与课件无关，直接说明你只能回答这门课的内容。"""
+1. 先判断用户问的是哪一类，再选工具。问知识点才走检索，问自己的药直接查接口。
+2. 只依据工具返回的内容回答，工具说没找到就直说没找到，不要用常识补。
+3. 写操作（confirm_reminder）必须先向用户确认是哪一条、什么动作，得到同意后再调用。
+4. 用药合规红线：只陈述记录里的事实（几点、什么药、是否确认）。
+   绝不给出用药建议、不判断药物相互作用、不推荐剂量或替代药。
+   遇到这类问题，明确说明「我不能提供用药建议，请咨询医生或药师」。
+5. 回答用简体中文，简洁分点；引用课件时保留出处（小节 + 页码）。"""
 
 
 def _client() -> OpenAI:
@@ -101,7 +103,7 @@ def run_turn(
             if name in WRITE_TOOLS and not confirm(
                 f"\n即将执行写操作 {name}：{json.dumps(args, ensure_ascii=False)}\n确认吗？(y/N) "
             ):
-                result: dict = {"saved": False, "reason": "用户未确认，已取消"}
+                result: dict = {"ok": False, "error": "用户未确认，已取消，未执行任何写操作"}
             else:
                 try:
                     result = execute(name, args)

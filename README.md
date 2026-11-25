@@ -42,10 +42,11 @@ python ingest.py --raw
 python eval.py --collection courseware_ch7_raw --k 1
 
 # 7) Agent（v2）：带工具调用的命令行
+#    先启动用药后端（localhost:8080），并在 .env 配好 MED_PASSWORD
 python -m agent.main
-#    · 问「这门课有哪些小节」→ 调 list_sections（不检索）
+#    · 问「我今天要吃什么药」→ 调 get_today_reminders（真实 HTTP 接口）
 #    · 问「数据库设计分几步」→ 调 search_courseware（走 RAG）
-#    · 说「把这部分存成笔记」→ 先问确认，再调 save_note
+#    · 说「20 点那个已服」→ 先问确认，再调 confirm_reminder
 
 # 8) 跑测试（假模型，不消耗 API）
 python -m pytest tests -q
@@ -60,15 +61,22 @@ python -m pytest tests -q
 
 ## v2：从 RAG 到 Agent（工具调用层）
 
-RAG 只有一条路：**总是**检索 → 生成，只能回答，不能办事。v2 在它外面加了一层"先判断该做什么"，三个工具：
+RAG 只有一条路：**总是**检索 → 生成，只能回答，不能办事。v2 在它外面加了一层"先判断该做什么"，四个工具跨两类数据源：
 
-| 工具 | 作用 | 是否走模型 |
-|---|---|---|
-| `search_courseware` | 查课件里的具体知识，复用原 RAG 链路 | 是（检索 + 生成） |
-| `list_sections` | 列章节与页码范围，直接读 Chroma 元数据聚合 | 否（秒回） |
-| `save_note` | 把整理好的内容写成 Markdown 笔记 | 否（写文件） |
+| 工具 | 数据源 | 作用 | 是否走模型 |
+|---|---|---|---|
+| `search_courseware` | Chroma 向量库 | 查课件知识，复用原 RAG 链路 | 是（检索 + 生成） |
+| `get_today_reminders` | Spring Boot `/api/reminders/today` | 查今日服药提醒 | 否（纯接口） |
+| `get_recent_records` | Spring Boot `/api/records` | 查最近服药记录 | 否（纯接口） |
+| `confirm_reminder` | Spring Boot `/api/reminders/{id}/confirm` | 标记已服 / 稍后 / 跳过（**写操作**） | 否（纯接口） |
 
-三个工具刚好覆盖三种动作：**查知识 / 查结构 / 写数据**。第三个是故意放的——写操作才逼得出"安全护栏"。
+**同一个 Agent 同时接两种后端**：一个走向量检索（非结构化文档），三个走 REST 接口（结构化数据 + JWT）。这正是"换功能只换工具，不换骨架"的验证。
+
+### 接真实接口要处理的三件事
+
+1. **JWT 登录与缓存**：`agent/backend.py` 首次调用登录拿 token，之后复用（加锁避免并发重复登录）。课件工具是本地函数调用，没有身份这一层。
+2. **字段归一化**：后端返回 `{code, message, data:[{medicineName, mealRelation:2, status:"TRIGGERED"}]}`，工具转成 `{药品, 餐时:"餐后", 状态:"已触发"}`，模型读起来更准，不会把 `code` 当业务字段念。
+3. **合规红线**：提示词明确"只陈述记录事实，不给用药建议、不判断相互作用、不推荐剂量"，遇到这类问题固定回复"请咨询医生或药师"。这对应毕设里"系统不做药事顾问"的边界。
 
 ### 主循环（`agent/loop.py`）
 
@@ -83,7 +91,7 @@ RAG 只有一条路：**总是**检索 → 生成，只能回答，不能办事�
 
 | 护栏 | 实现 | 防什么 |
 |---|---|---|
-| 写操作确认 | `save_note` 前弹确认，拒绝则不执行 | 模型擅自动用户数据 |
+| 写操作确认 | `confirm_reminder` 前弹确认，拒绝则不发请求 | 模型擅自动用户数据 |
 | 无证据拒答 | 复用 `is_low_confidence()`，`found=false` 时不编 | 拿无关片段硬答 |
 | 工具异常降级 | `try/except` 转成 `{"error": ...}` 回填 | 一个工具挂了整轮对话崩溃 |
 | 最大轮数 | `MAX_STEPS = 5` | 模型反复调工具死循环 |
@@ -218,7 +226,8 @@ rag-demo/
 ├── app.py                   # Streamlit 界面
 ├── eval.py                  # 分层评测（原文/改写/组合/负样本）
 ├── agent/                   # v2：Agent 工具调用层
-│   ├── tools.py             # 三个工具：查内容 / 列章节 / 存笔记
+│   ├── tools.py             # 四个工具：查课件 / 查今日提醒 / 查记录 / 确认服药
+│   ├── backend.py           # 用药后端封装：JWT 登录缓存 + 字段归一化
 │   ├── loop.py              # 主循环 + 四个护栏
 │   └── main.py              # 命令行入口
 ├── tests/test_agent.py      # 11 条用例（假模型，不消耗 API）
