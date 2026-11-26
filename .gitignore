@@ -13,3 +13,6 @@ chunks_dump.txt
 # 密钥：只提交 .env.example
 .env
 .env.local
+
+# Agent 生成的笔记
+notes/
